@@ -1,0 +1,99 @@
+#!/usr/bin/env perl
+use DBI;
+use Getopt::Long qw(:config no_ignore_case pass_through);
+use Digest::MD5 qw(md5_hex);
+use Nagios::Plugin;
+
+$np = Nagios::Plugin->new;
+
+$tunit='sec';
+$multiplier=1;
+my $dbfile = '/usr/local/nagios3/var/check_rate_data.db';      # your database file
+my $dbh = DBI->connect(          # connect to your database, create if
+    "dbi:SQLite:dbname=$dbfile", # DSN: dbi, driver, database file
+    "",                          # no user
+    "",                          # no password
+    { RaiseError => 1 },         # complain if something goes wrong
+) or die $DBI::errstr;
+
+#init db
+$sth = $dbh->prepare("CREATE TABLE IF NOT EXISTS data (id text primary key asc,value,timestamp,info);") or die $DBI::errstr;
+$sth->execute();
+
+sub usage {
+    print << "EOF";
+Usage: check_rate.pl [-h] [--sec] [--min] [--unit] -C -w -c 
+--sec   print rate per second
+--min   print rate per minute
+--5min    print rate per 5 minutes
+-C,--command  the command to execute
+--warn    warning threshold
+--critical  critical threshold
+--unit    unit name to append to the value
+-h,--help print this help screen
+--verbose print verbose information
+
+EOF
+exit 1;
+};
+
+GetOptions( \%opt,
+        'help',
+  'warning=s',
+  'critical|c=s',
+  'command|C=s',
+  'min',
+  'sec',
+  '5min',
+  'unit=s',
+  'verbose+'
+) or &usage();
+if ( $opt{'help'} ) { &usage() };
+
+$command = $opt{'command'};
+$verbose = $opt{'verbose'};
+$warn=$opt{'warning'};
+$crit=$opt{'critical'};
+$unit=$opt{'unit'};
+
+print "command: $command\nwarn: $warn\ncrit: $crit\n" if $verbose;
+$hash = md5_hex($command);
+
+#$dbh->do("select value,timestamp from data where id='$hash';")
+#  or die $DBI::errstr;
+
+#get old values from db
+$sth = $dbh->prepare("select value,timestamp from data where id=?") or die $DBI::errstr;
+$sth->execute($hash);
+@row= $sth->fetchrow_array();
+$oldvalue = $row[0];
+$oldtime = $row[1];
+
+#execute command;
+$curtime = time;
+$value = `$command`;
+chomp $value;
+
+#calculate delta
+$dt = $curtime - $oldtime;
+$dv = $value - $oldvalue;
+$rate = $dv/$dt;
+if($opt{'min'}) {$multiplier=60; $tunit='min'; print "-min option given will print rate per minute\n" if $verbose;}
+if($opt{'5min'}) {$multiplier=300; $tunit='5min'; print "-5min option given will print rate per 5 minutes\n" if $verbose;}
+$rate*=$multiplier;
+
+#printf "%s %s/%s\n", $status, $rate, $tunit;
+#printf "dv: %s, dt: %s\n",$dv, $dt if $verbose;
+
+#put new value in database
+$sth = $dbh->prepare("insert or replace into data (id,value,timestamp,info) values (?,?,?,?)") or die $DBI::errstr;
+$sth->execute($hash,$value,$curtime,$command);
+
+$code = $np->check_threshold(
+     check => $rate,
+     warning => $warn,
+     critical => $crit,
+   );
+if($code==OK) { $np->nagios_exit( OK, "${rate} ${unit}/${tunit}" ); }
+else { $np->nagios_exit( $code, "Threshold check failed, ${rate} ${unit}/${tunit}" ); }
+
