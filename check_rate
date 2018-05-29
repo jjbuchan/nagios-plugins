@@ -22,16 +22,19 @@ $sth->execute();
 
 sub usage {
     print << "EOF";
-Usage: check_rate.pl [-h] [--sec] [--min] [--unit] -C -w -c 
+Usage: check_rate.pl [-h] [--sec] [--min] [--hour] [--unit] [--period] -C -w -c
 --sec   print rate per second
 --min   print rate per minute
 --5min    print rate per 5 minutes
+--hour  print rate per hour
 -C,--command  the command to execute
 --warn    warning threshold
 --critical  critical threshold
 --unit    unit name to append to the value
+--period  time to store previous high value for rate evaluation in minutes (default 60)
 -h,--help print this help screen
 --verbose print verbose information
+
 
 EOF
 exit 1;
@@ -45,7 +48,9 @@ GetOptions( \%opt,
   'min',
   'sec',
   '5min',
+  'hour',
   'unit=s',
+  'period|p=s',
   'verbose+'
 ) or &usage();
 if ( $opt{'help'} ) { &usage() };
@@ -55,6 +60,7 @@ $verbose = $opt{'verbose'};
 $warn=$opt{'warning'};
 $crit=$opt{'critical'};
 $unit=$opt{'unit'};
+$period=$opt{'period'} || 60;
 
 print "command: $command\nwarn: $warn\ncrit: $crit\n" if $verbose;
 $hash = md5_hex($command);
@@ -80,12 +86,21 @@ $dv = $value - $oldvalue;
 $rate = $dv/$dt;
 if($opt{'min'}) {$multiplier=60; $tunit='min'; print "-min option given will print rate per minute\n" if $verbose;}
 if($opt{'5min'}) {$multiplier=300; $tunit='5min'; print "-5min option given will print rate per 5 minutes\n" if $verbose;}
+if($opt{'hour'}) {$multiplier=3600; $tunit='hour'; print "-hour option given will print rate per hour\n" if $verbose;}
 $rate*=$multiplier;
+# We are monitoring declining rate so reverse the calculated value for check_threshold to work.
+$rate*=-1;
 
 #printf "%s %s/%s\n", $status, $rate, $tunit;
 #printf "dv: %s, dt: %s\n",$dv, $dt if $verbose;
 
-#put new value in database
+#determine value to keep in database
+if ($dt < $period*60 && $dv < 0) {
+  $value = $oldvalue;
+  $curtime = $oldtime;
+}
+
+#put largest value from last hour in database
 $sth = $dbh->prepare("insert or replace into data (id,value,timestamp,info) values (?,?,?,?)") or die $DBI::errstr;
 $sth->execute($hash,$value,$curtime,$command);
 
@@ -96,4 +111,3 @@ $code = $np->check_threshold(
    );
 if($code==OK) { $np->nagios_exit( OK, "${rate} ${unit}/${tunit}" ); }
 else { $np->nagios_exit( $code, "Threshold check failed, ${rate} ${unit}/${tunit}" ); }
-
